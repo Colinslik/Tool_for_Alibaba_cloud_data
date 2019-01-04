@@ -41,7 +41,7 @@ USAGE_FILE = 'container_usage.csv'
 OUTPUT_PATH = '/Analysis/'
 OUTPUT_PREFIX = 'container_usage_of_hour_'
 
-ANALYSIS_OUTPUT_PATH = WORKDIR_PATH + '/Merged_files/'
+ANALYSIS_OUTPUT_PATH = WORKDIR_PATH + '/Merged_files'
 ANALYSIS_OUTPUT_FILE = 'container_total_output.csv'
 
 usage_column = {'container_id': 0, 'machine_id': 1,
@@ -57,9 +57,9 @@ meta_column = {'container_id': 0, 'machine_id': 1,
 
 fill_usage_column = {'container_id': "c_0", 'machine_id': "m_0",
                 'time_stamp': 0, 'cpu_util_percent': 0,
-                'mem_util_percent': 0, 'cpi': 0,
-                'mem_gps': 0, 'mpki': 0,
-                'net_in': 0, 'net_out': 0,
+                'mem_util_percent': 0, 'cpi': 0.0,
+                'mem_gps': 0.0, 'mpki': 0,
+                'net_in': 0.0, 'net_out': 0.0,
                 'disk_io_percent': 0}
 
 fill_meta_column = {'container_id': "c_0", 'machine_id': "m_0",
@@ -68,9 +68,9 @@ fill_meta_column = {'container_id': "c_0", 'machine_id': "m_0",
                'cpu_limit': 0, 'mem_size': 0}
 
 search_key = 'container_id'
-merge_entry_pair = [('cpu_util_percent', 'cpu_request'), ('mem_util_percent',
+merge_entry_pair = [('cpu_util_percent', 'cpu_limit'), ('mem_util_percent',
                                                           'mem_size')]
-correction_term = {'cpu_util_percent': 1.0 / 100.0, 'cpu_request': 1.0 / 100.0, 'mem_util_percent': 1.0 /
+correction_term = {'cpu_util_percent': 1.0 / 100.0, 'cpu_limit': 1.0 / 100.0, 'mem_util_percent': 1.0 /
                    100.0, 'mem_size': MEMORY_SIZE, 'net_in': 1.0, 'net_out': 1.0, 'disk_io_percent': 1.0 / 100.0}
 output_entry_list = ['cpu_util_percent', 'mem_util_percent',
                      'net_in', 'net_out', 'disk_io_percent']
@@ -88,7 +88,7 @@ USAGE_FILE = 'container_usage.csv'
 OUTPUT_PATH = '\\Analysis\\'
 OUTPUT_PREFIX = 'container_usage_of_hour_'
 
-ANALYSIS_OUTPUT_PATH = WORKDIR_PATH + 'Merged_files\\'
+ANALYSIS_OUTPUT_PATH = WORKDIR_PATH + 'Merged_files'
 ANALYSIS_OUTPUT_FILE = 'container_total_output.csv'
 
 usage_column = {'time_stamp': 0, 'instance_id': 1,
@@ -179,6 +179,46 @@ def pre_processing():
         print e
 
 
+def memory_manager_processing(filename, container_event_dict):
+    try:
+        csv_file = WORKDIR_PATH + OUTPUT_PATH + filename
+        usage_file = pd.read_csv(
+            csv_file, index_col=False, names=[str(v[0]) for v in sorted(
+                usage_column.items(), key=lambda d: d[1])])
+
+        usage_file.fillna(value=fill_usage_column, inplace=True)
+
+        for condition in conditons_list:
+            expression = "(usage_file.{0} < {1}) | (usage_file.{0} > {2})".format(
+                condition.keys()[0], condition.values()[0][0], condition.values()[0][1])
+
+            usage_file = usage_file.drop(
+                usage_file[pd.eval(expression)].index).reset_index(drop=True)
+
+        for usage_key, event_key in merge_entry_pair:
+            usage_file[usage_key] = [(x * correction_term[usage_key]) *
+                                     (container_event_dict[
+                                         y][event_key] * correction_term[event_key])
+                                     if y in container_event_dict else 0.0
+                                     for x, y in zip(usage_file[usage_key], usage_file[search_key])]
+
+        for filter in filter_list:
+            usage_file[filter.keys()[0]] = [re.sub(filter.values()[0], "", str(x))
+                                            for x in usage_file[filter.keys()[0]]]
+
+        # index will be replaced by search_key
+        usage_file.set_index(keys=search_key, inplace=True)
+        usage_file = usage_file.groupby(level=0).mean()
+
+        usage_file.to_csv(ANALYSIS_OUTPUT_PATH + OUTPUT_PATH + filename,
+                          sep=',', header=False, index=True)
+
+        print "File output to " + ANALYSIS_OUTPUT_PATH + OUTPUT_PATH + filename
+
+    except Exception as e:
+        print e
+
+
 def post_processing_parallel(container_file_list):
     container_event_file = WORKDIR_PATH + SRC_PATH + EVENT_FILE
     container_event_dict = {}
@@ -189,40 +229,23 @@ def post_processing_parallel(container_file_list):
         event_file = pd.read_csv(
             container_event_file, index_col=False,
             names=[str(v[0]) for v in sorted(meta_column.items(), key=lambda d: d[1])])
-        event_file.fillna(fill_meta_column)
-        container_event_dict = event_file.set_index(
-            search_key).T.to_dict('dict')
+        event_file.fillna(value=fill_meta_column, inplace=True)
+        event_file.set_index(
+            keys=search_key, inplace=True)
+        event_file = event_file[~event_file.index.duplicated(keep='first')]
+        container_event_dict = event_file.to_dict('index')
 
         for filename in container_file_list:
-            csv_file = WORKDIR_PATH + OUTPUT_PATH + filename
-            usage_file = pd.read_csv(
-                csv_file, index_col=False, names=[str(v[0]) for v in sorted(
-                    usage_column.items(), key=lambda d: d[1])])
+            process = multiprocessing.Process(target=memory_manager_processing, args=(
+                filename, container_event_dict), name="AnalysisSub")
+            process.daemon = True
+            process.start()
+            process.join()
 
-            usage_file.fillna(fill_usage_column)
-
-            for condition in conditons_list:
-                expression = "(usage_file.{0} < {1}) | (usage_file.{0} > {2})".format(
-                    condition.keys()[0], condition.values()[0][0], condition.values()[0][1])
-
-                usage_file = usage_file.drop(
-                    usage_file[pd.eval(expression)].index).reset_index(drop=True)
-
-            for filter in filter_list:
-                usage_file[filter.keys()[0]] = [re.sub(filter.values()[0], "", str(x))
-                                                for x in usage_file[filter.keys()[0]]]
-
-            for usage_key, event_key in merge_entry_pair:
-                usage_file[usage_key] = [(x * correction_term[usage_key]) *
-                                         (container_event_dict[
-                                             y][event_key] * correction_term[event_key])
-                                         if y in container_event_dict else 0.0
-                                         for x, y in zip(usage_file[usage_key], usage_file[search_key])]
-
-            usage_file.to_csv(ANALYSIS_OUTPUT_PATH + OUTPUT_PATH + filename,
-                              sep=',', header=False, index=False)
     except Exception as e:
         print e
+
+    print "Sub-process has ended."
 
 
 def post_processing():
@@ -248,8 +271,8 @@ def post_processing():
                     end = (num + 1) * count
                 process = multiprocessing.Process(target=post_processing_parallel, args=(
                     [container_usage_file[start: end]]), name="AnalysisParallel")
-                process_list.append(process)
                 process.start()
+                process_list.append(process)
 
             for proc in process_list:
                 proc.join()
